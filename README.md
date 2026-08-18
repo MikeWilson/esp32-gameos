@@ -1,15 +1,10 @@
 # gameos
 
-A from-scratch handheld game OS — and a growing set of games — for the
+A handheld game OS — and a growing set of games — for the
 **Waveshare ESP32-S3-Touch-AMOLED-1.8** (368x448 AMOLED, touch, IMU,
 speaker, 8 MB PSRAM). Plain C on ESP-IDF; no game engine, no LVGL in the
 frame path, no sprite/PCM asset files. Everything you see and hear is
 procedural.
-
-> This project was built almost entirely with AI (Claude Code) driving the
-> code, with a human on the device doing the playtesting, taste, and
-> "that's 2x too fast" calls. The docs below double as the working notes
-> that made that loop work.
 
 | Launcher | Gunship | Golf | Golf: aiming |
 |---|---|---|---|
