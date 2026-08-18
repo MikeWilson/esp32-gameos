@@ -1,0 +1,5 @@
+build/
+managed_components/
+sdkconfig.old
+.DS_Store
+.cache/
