@@ -227,14 +227,58 @@ static void draw_bottom_bar(const char *btn)
     }
 }
 
+// The channel grid scrolls vertically once it outgrows the screen: drag
+// anywhere in the grid to scroll (same interaction as the settings list),
+// release-tap to launch — a contact that scrolled never launches. With six
+// or fewer games nothing scrolls and the layout is exactly the classic 2x3.
+#define GRID_VIEW_Y0 4
+#define GRID_VIEW_Y1 196
+#define GRID_ROW_PITCH 64
+
+static int grid_scroll;
+static int16_t grid_last_y;
+static bool grid_touching;
+static int grid_moved;
+
 static void grid_frame(void)
 {
-    draw_field();
+    int rows = (g_game_count + 1) / 2;
+    if (rows < 3) rows = 3;             // always at least the classic 3 rows
+    int content_h = 6 + rows * GRID_ROW_PITCH;
+    int view_h = GRID_VIEW_Y1 - GRID_VIEW_Y0;
+    int max_scroll = content_h > view_h ? content_h - view_h : 0;
 
-    // 2x3 channel grid; slots without a game draw as empty channels
-    for (int i = 0; i < 6; i++) {
+    // drag-to-scroll: the grid follows the finger; real vertical movement
+    // marks the contact as a scroll so its release can't launch anything
+    const gos_input_t *in = gos_input_get();
+    if (in->touching && in->touch.y < GRID_VIEW_Y1 + 20) {
+        if (!grid_touching) {
+            grid_touching = true;
+            grid_last_y = in->touch.y;
+            grid_moved = 0;
+        } else {
+            int dy = in->touch.y - grid_last_y;
+            grid_moved += dy < 0 ? -dy : dy;
+            grid_scroll -= dy;
+            grid_last_y = in->touch.y;
+            if (grid_scroll < 0) grid_scroll = 0;
+            if (grid_scroll > max_scroll) grid_scroll = max_scroll;
+        }
+    } else if (!in->touching) {
+        grid_touching = false;
+    }
+    bool can_launch = grid_moved < 12;
+
+    draw_field();
+    gos_gfx_set_clip((gos_rect_t){ 0, GRID_VIEW_Y0, GOS_SCREEN_W,
+                                   GRID_VIEW_Y1 - GRID_VIEW_Y0 });
+
+    // draw every slot up to a full final row; unfilled slots = empty channels
+    int slots = rows * 2;
+    for (int i = 0; i < slots; i++) {
         int col = i % 2, row = i / 2;
-        int cx = 4 + col * 92, cy = 10 + row * 64;
+        int cx = 4 + col * 92, cy = 10 + row * GRID_ROW_PITCH - grid_scroll;
+        if (cy + 58 < GRID_VIEW_Y0 || cy > GRID_VIEW_Y1) continue;
         if (i >= g_game_count) {
             round_fill(cx, cy, 84, 58, UI_EMPTY);
             round_border(cx, cy, 84, 58, UI_EMPTY_BD);
@@ -251,11 +295,24 @@ static void grid_frame(void)
             int tw = gos_gfx_text_w(0, g->title);
             gos_gfx_text(0, cx + 42 - tw / 2, cy + 38, UI_TEXT, "%s", g->title);
         }
-        // release-only: a finger merely landing here must never launch a game
-        if (tap_release_in(cx, cy, 84, 70)) {
+        // release-only: a finger merely landing here must never launch a
+        // game — and neither may a scroll gesture's release
+        if (can_launch && tap_release_in(cx, cy, 84, 70)) {
+            gos_gfx_clear_clip();
             launch(g);
             return;
         }
+    }
+    gos_gfx_clear_clip();
+
+    // slim scrollbar so more games below are discoverable
+    if (max_scroll > 0) {
+        int track = GRID_VIEW_Y1 - GRID_VIEW_Y0 - 4;
+        int th = track * view_h / content_h;
+        if (th < 16) th = 16;
+        int ty = GRID_VIEW_Y0 + 2 + (track - th) * grid_scroll / max_scroll;
+        gos_gfx_vline(GOS_SCREEN_W - 3, GRID_VIEW_Y0 + 2, GRID_VIEW_Y1 - 2, UI_EMPTY);
+        gos_gfx_vline(GOS_SCREEN_W - 3, ty, ty + th, UI_DIM);
     }
 
     draw_bottom_bar("SET");
