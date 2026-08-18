@@ -3,3 +3,4 @@ managed_components/
 sdkconfig.old
 .DS_Store
 .cache/
+components/games/bomber/

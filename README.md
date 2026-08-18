@@ -1,6 +1,6 @@
 # gameos
 
-A from-scratch handheld game OS — and six games — for the
+A from-scratch handheld game OS — and a growing set of games — for the
 **Waveshare ESP32-S3-Touch-AMOLED-1.8** (368x448 AMOLED, touch, IMU,
 speaker, 8 MB PSRAM). Plain C on ESP-IDF; no game engine, no LVGL in the
 frame path, no sprite/PCM asset files. Everything you see and hear is
@@ -11,13 +11,9 @@ procedural.
 > "that's 2x too fast" calls. The docs below double as the working notes
 > that made that loop work.
 
-| Launcher | Gunship | Golf | Bomber |
+| Launcher | Gunship | Golf | Golf: aiming |
 |---|---|---|---|
-| ![launcher](media/launcher.png) | ![gunship](media/gunship.png) | ![golf](media/golf.png) | ![bomber](media/bomber-cruise.png) |
-
-| Golf: aiming | Bomber: bombsight | Bomber: debrief |
-|---|---|---|
-| ![aiming](media/golf-aiming.png) | ![sight](media/bomber-sight.png) | ![debrief](media/bomber-debrief.png) |
+| ![launcher](media/launcher.png) | ![gunship](media/gunship.png) | ![golf](media/golf.png) | ![aiming](media/golf-aiming.png) |
 
 *(Frames rendered by the host simulator — pixel-identical to the device.)*
 
@@ -30,13 +26,6 @@ procedural.
   SDF-generated courses, three clubs, wind, swing-by-actually-swinging-the-
   device (IMU stroke integration), 18-hole rounds, pass-and-play for 2-4,
   leaderboard. Full-res RGB565 with real Montserrat type.
-- **BOMBER** — top-down bomber over an endless procedurally generated
-  countryside. Tilt to steer; the physical button commits you to a
-  straight-and-level run through a circular bombsight where you trim
-  against live wind and release with real time-of-fall. Flak accuracy
-  ramps the longer you stay sighted — every bomb run is a stay-or-bail
-  bet. Escalating sorties, manila-folder mission briefs with seeded
-  operation codenames and an inked route chart.
 - **SLOTS** — a palette-trickery slot machine with a physical pull gesture.
 - **DIAG / AIM TEST** — built-in hardware diagnostics and the tilt-aim
   latency test harness.
@@ -57,7 +46,7 @@ games → contract (gos.h) → shell → core → HAL      (dependencies point d
 - Two render paths: a 184x224 indexed-8 pipeline (palette LUT applied
   during a 2x DMA upscale — gunship's thermal look is mostly palette
   animation) and a full-res 368x448 RGB565 direct mode with a Montserrat
-  text service rendered straight from LVGL font data (golf, bomber).
+  text service rendered straight from LVGL font data (golf).
 - Fixed 1/60 game loop; a flush task overlaps palette/upscale work with
   panel DMA in ping-pong bands. 60.0 fps measured on all games.
 - 8-voice chip synth (22 kHz mono) — every sound is a note table.
@@ -72,7 +61,7 @@ components/
   gos_hal/             display, touch, IMU fusion, audio, power, button
   gos_core/            gfx, fonts, input, mixer, save, rng, grid, loop
   gos_shell/           launcher, settings, pause overlay, calibration, registry
-  games/               gunship, golf, bomber, slots (+ diag/aimtest in shell)
+  games/               gunship, golf, slots (+ diag/aimtest in shell)
 docs/                  the platform book: hardware traps, game contract,
                        rendering, input/UX rules, audio, verification,
                        design playbook
@@ -101,10 +90,10 @@ idf.py -p /dev/cu.usbmodemXXXX flash    # port may re-enumerate after flashing
 Every game ships with `#ifdef GOS_HOST_SIM` hooks: the real game sources
 compile on a desktop against ~50 lines of stub services, driven by scripted
 input, dumping pixel-exact PPM frames. The rule here is that sims must
-*instrument a claim* — "first target visible in under 2 seconds", "release
-prediction error under 3 px", "a 6-second greedy bomb run costs ~57%
-damage", "an 18-hole round completes through the leaderboard save" — not
-just render pretty frames. See
+*instrument a claim* — "the first zombie is on screen within a second of
+mission start", "a released shot lands where the preview predicted",
+"an 18-hole round completes through the leaderboard save" — not just
+render pretty frames. See
 [`docs/testing-and-verification.md`](docs/testing-and-verification.md).
 
 ## License
