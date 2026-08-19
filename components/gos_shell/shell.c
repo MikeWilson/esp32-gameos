@@ -10,7 +10,8 @@
 #include "nvs_flash.h"
 #include "gos_hal.h"
 
-typedef enum { SH_GRID, SH_SETTINGS, SH_RUNNING, SH_OVERLAY, SH_CALIB } sh_mode_t;
+typedef enum { SH_GRID, SH_SETTINGS, SH_RUNNING, SH_OVERLAY, SH_CALIB,
+               SH_TILT } sh_mode_t;
 
 static sh_mode_t mode = SH_GRID;
 static sh_mode_t calib_return = SH_GRID;   // where the wizard goes on done
@@ -346,6 +347,8 @@ void settings_reset_view(void)
     reset_hold = 0;
 }
 
+static void tilt_start(void);   // the TILT SETUP wizard, below
+
 static void settings_frame(void)
 {
     static const char *aim_names[] = { "TILT", "GYRO", "TOUCH" };
@@ -356,7 +359,7 @@ static void settings_frame(void)
     // first; the shared tilt-aim service sits under its own header (it read
     // as gunship leftovers otherwise — user-reported)
     enum { R_VOLUME, R_BRIGHT, R_HDR, R_AIM, R_SENS, R_INVY, R_INVX,
-           R_CALIB, R_RESET, R_COUNT };
+           R_TILT, R_CALIB, R_RESET, R_COUNT };
     struct { const char *label; char val[12]; } rows[R_COUNT];
     rows[R_VOLUME].label = "VOLUME";
     snprintf(rows[R_VOLUME].val, 12, "%s", vol_names[g_settings.volume % 4]);
@@ -372,6 +375,8 @@ static void settings_frame(void)
     snprintf(rows[R_INVY].val, 12, "%s", g_settings.invert_y ? "ON" : "OFF");
     rows[R_INVX].label = "INVERT X";
     snprintf(rows[R_INVX].val, 12, "%s", g_settings.invert_x ? "ON" : "OFF");
+    rows[R_TILT].label = "TILT SETUP";
+    rows[R_TILT].val[0] = 0;
     rows[R_CALIB].label = "RECALIBRATE AIM";
     rows[R_CALIB].val[0] = 0;
     rows[R_RESET].label = "FACTORY RESET";
@@ -458,12 +463,16 @@ static void settings_frame(void)
             case R_SENS: g_settings.sensitivity = (g_settings.sensitivity + 1) % 3; break;
             case R_INVY: g_settings.invert_y ^= 1; break;
             case R_INVX: g_settings.invert_x ^= 1; break;
+            case R_TILT:
+                tilt_start();
+                mode = SH_TILT;
+                break;
             case R_CALIB:
                 calib_return = SH_SETTINGS;
                 mode = SH_CALIB;
                 break;
             }
-            if (i != R_CALIB) {
+            if (i != R_CALIB && i != R_TILT) {
                 gos_settings_save();
                 gos_settings_apply();
             }
@@ -510,6 +519,172 @@ static void calib_frame(void)
         if (calib_return == SH_RUNNING && cur) cur->resume(&ctx);
         mode = calib_return;
     }
+}
+
+// --- TILT SETUP -------------------------------------------------------------
+// Teaches the OS how the accelerometer sits inside THIS unit. The part is not
+// mounted the same way on every board of this model, so a fixed mapping aims
+// left/right (or up/down) backwards on some of them and there is nothing the
+// user can do about it from the aim settings.
+//
+// The wizard asks for two gestures and reads which raw axis moved and which
+// way. It never shows an axis letter or a sign: the user tilts the device the
+// way the screen describes, the OS writes down what it saw.
+//
+// Sign convention, and why it is "minus what we measured": both prompts name
+// the gesture that must aim NEGATIVE. Tilting the top edge toward you puts the
+// screen's downhill toward the top edge, which is aim up (pitch < 0); dropping
+// the left edge is aim left (roll < 0). So an axis whose delta went positive
+// during the gesture has to be read negated. On the two units measured
+// 2026-08-19 this reproduces exactly the platform's original pitch<-+ax with
+// roll<-ay, which is the combination those boards need.
+#define TILT_DELTA_G  0.25f    // how far from neutral counts as a deliberate tilt
+#define TILT_HOLD_MS  1000     // ...and how long it must be held there
+
+enum { TS_NEUTRAL, TS_PITCH, TS_ROLL, TS_DONE };
+static int ts_step;
+static float ts_nx, ts_ny, ts_nz;      // raw gravity in the play pose
+static uint8_t ts_pitch_axis;
+static int8_t ts_pitch_sign, ts_roll_sign;
+static int ts_cand_axis = -1;          // axis being held away from neutral
+static int ts_cand_sign;
+static uint32_t ts_cand_ms;            // when this candidate started
+static uint32_t ts_msg_ms;             // TRY AGAIN flash / DONE dwell
+
+static void tilt_start(void)
+{
+    ts_step = TS_NEUTRAL;
+    ts_cand_axis = -1;
+    ts_msg_ms = 0;
+    ESP_LOGI("shell", "tilt setup: start");
+}
+
+// dominant axis of the deflection from neutral, if it is big enough to be
+// intent rather than hand tremor
+static bool tilt_gesture(float dx, float dy, int *axis, int *sign)
+{
+    float mx = dx < 0 ? -dx : dx, my = dy < 0 ? -dy : dy;
+    int a = my > mx ? 1 : 0;
+    if ((a ? my : mx) < TILT_DELTA_G) return false;
+    *axis = a;
+    *sign = (a ? dy : dx) < 0 ? -1 : 1;
+    return true;
+}
+
+static void tilt_commit(void)
+{
+    g_settings.tilt_pitch_axis = ts_pitch_axis;
+    g_settings.tilt_pitch_neg = ts_pitch_sign < 0;
+    g_settings.tilt_roll_neg = ts_roll_sign < 0;
+    g_settings.calibrated = 1;
+    gos_settings_save();
+    gos_settings_apply();      // pushes the map into the running IMU task
+    // The neutral was captured before the map existed, so convert that raw
+    // vector rather than asking the user to hold the play pose a second time
+    // (they are holding the device tilted at this exact moment).
+    float p, r;
+    hal_imu_angles_from_accel(ts_nx, ts_ny, ts_nz, &p, &r);
+    gos_input_set_neutral(p, r);
+    gos_input_save_neutral(cur ? cur->id : "sys");
+    ESP_LOGI("shell", "tilt setup: saved, neutral P%+.1f R%+.1f",
+             (double)p, (double)r);
+}
+
+static void tilt_frame(void)
+{
+    // GRAY64 ramp only, same rule as calib_frame
+    gos_gfx_clear(UI_BG);
+
+    float ax = 0, ay = 0, az = 0;
+    bool imu = hal_imu_raw_accel(&ax, &ay, &az);
+    uint32_t now = gos_time_ms();
+    int progress = 0;      // hold bar, 0..100
+
+    if (ts_step == TS_NEUTRAL) {
+        // release-tap, and not in the top strip: that band belongs to the
+        // cancel swipe
+        if (imu && tap && pt_in(tap_pt, 0, 34, GOS_SCREEN_W, GOS_SCREEN_H - 34)) {
+            ts_nx = ax; ts_ny = ay; ts_nz = az;
+            ts_step = TS_PITCH;
+            ts_cand_axis = -1;
+            ESP_LOGI("shell", "tilt setup: neutral %+.2f %+.2f %+.2f",
+                     (double)ax, (double)ay, (double)az);
+        }
+    } else if (ts_step != TS_DONE) {
+        int axis, sign;
+        if (imu && tilt_gesture(ax - ts_nx, ay - ts_ny, &axis, &sign)) {
+            bool fresh = axis != ts_cand_axis || sign != ts_cand_sign;
+            if (fresh) {
+                ts_cand_axis = axis;
+                ts_cand_sign = sign;
+                ts_cand_ms = now;
+            }
+            if (ts_step == TS_ROLL && axis == ts_pitch_axis) {
+                // the second gesture has to move the OTHER axis, or we learn
+                // nothing about roll
+                ts_msg_ms = now;
+                if (fresh) ESP_LOGI("shell", "tilt setup: same axis as pitch, retry");
+            } else if (now - ts_cand_ms >= TILT_HOLD_MS) {
+                if (ts_step == TS_PITCH) {
+                    ts_pitch_axis = (uint8_t)axis;
+                    ts_pitch_sign = (int8_t)-sign;
+                    ESP_LOGI("shell", "tilt setup: pitch <- %c accel %c",
+                             ts_pitch_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
+                    ts_step = TS_ROLL;
+                    ts_cand_axis = -1;
+                } else {
+                    ts_roll_sign = (int8_t)-sign;
+                    ESP_LOGI("shell", "tilt setup: roll <- %c accel %c",
+                             ts_roll_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
+                    tilt_commit();
+                    ts_step = TS_DONE;
+                    ts_msg_ms = now;
+                }
+            } else {
+                progress = (int)((now - ts_cand_ms) * 100 / TILT_HOLD_MS);
+            }
+        } else {
+            ts_cand_axis = -1;
+        }
+    } else if (now - ts_msg_ms > 900) {
+        mode = SH_SETTINGS;     // only ever entered from settings
+        return;
+    }
+
+    static const char *lines[4][3] = {
+        { "HOLD THE", "DEVICE HOW", "YOU PLAY" },
+        { "TILT THE", "TOP EDGE", "TOWARD YOU" },
+        { "TILT THE", "LEFT EDGE", "DOWN" },
+        { "DONE", NULL, NULL },
+    };
+    if (ts_step != TS_DONE)
+        gos_gfx_text(0, 8, 14, UI_DIM, "TILT SETUP  %d/3", ts_step + 1);
+    for (int i = 0; i < 3; i++) {
+        const char *s = lines[ts_step][i];
+        if (!s) break;
+        int w = gos_gfx_text_w(1, s);
+        gos_gfx_text(1, GOS_SCREEN_W / 2 - w / 2, 60 + i * 18, UI_TEXT, "%s", s);
+    }
+
+    if (ts_step == TS_NEUTRAL) {
+        gos_gfx_text(0, 34, 140, GOS_GRAY64(0), "TAP TO SET CENTER");
+    } else if (ts_step != TS_DONE) {
+        const char *hint = now - ts_msg_ms < 900 ? "TRY AGAIN"
+                                                 : "AND HOLD IT THERE";
+        int w = gos_gfx_text_w(0, hint);
+        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 140, GOS_GRAY64(0), "%s", hint);
+        // the hold bar makes "sustained" visible instead of mysterious
+        gos_gfx_rect_fill((gos_rect_t){ 10, 158, 164, 4 }, UI_EMPTY);
+        if (progress > 0)
+            gos_gfx_rect_fill((gos_rect_t){ 10, 158,
+                                            (int16_t)(164 * progress / 100), 4 },
+                              GOS_GRAY64(0));
+    }
+
+    if (!imu) gos_gfx_text(0, 46, 176, UI_DIM, "NO MOTION SENSOR");
+    if (ts_step != TS_DONE)
+        gos_gfx_text(0, 8, GOS_SCREEN_H - 14, UI_DIM,
+                     "SWIPE DOWN FROM TOP = EXIT");
 }
 
 static void overlay_frame(const gos_input_t *in)
@@ -623,11 +798,19 @@ void shell_frame(const gos_input_t *in_ro, int n_updates)
     // Generous start zone: a real swipe-in from the bezel often first
     // registers well below the physical edge.
     if (!in.touching) swipe_armed = true;
-    if (mode == SH_RUNNING && swipe_armed && in.touching && t_press.y < 30 &&
-        in.touch.y - t_press.y > 30) {
+    bool swipe_down = swipe_armed && in.touching && t_press.y < 30 &&
+                      in.touch.y - t_press.y > 30;
+    if (mode == SH_RUNNING && swipe_down) {
         ESP_LOGI("shell", "pause via swipe");
         cur->suspend(&ctx);
         mode = SH_OVERLAY;
+    } else if (mode == SH_TILT && swipe_down) {
+        // the setup wizard is a screen like any other: the universal escape
+        // gets out of it, leaving the stored map untouched
+        ESP_LOGI("shell", "tilt setup: exit via swipe");
+        tap = false;   // this contact's release must not also hit a settings row
+        press_consumed = true;
+        mode = SH_SETTINGS;
     }
 
     // BOOT (game button A): games see raw press/release edges. The shell
@@ -665,6 +848,7 @@ void shell_frame(const gos_input_t *in_ro, int n_updates)
     case SH_GRID: grid_frame(); break;
     case SH_SETTINGS: settings_frame(); break;
     case SH_CALIB: calib_frame(); break;
+    case SH_TILT: tilt_frame(); break;
     case SH_OVERLAY: overlay_frame(&in); break;
     case SH_RUNNING: {
         if (!(cur->caps & GOS_CAP_TOUCH_FIRE)) {

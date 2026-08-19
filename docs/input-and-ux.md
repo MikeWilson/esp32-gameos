@@ -78,6 +78,41 @@ Tips:
   for one can't trigger its neighbor.
 - Yaw does not exist. Design aiming around pitch/roll only.
 
+## TILT SETUP: the sensor is not mounted the same way on every unit
+
+**Measured 2026-08-19 on two ESP32-S3-Touch-AMOLED-1.8 boards: held as played,
+gravity lands on accel +X, and dropping the LEFT edge drives accel Y
+positive.** The mapping the platform shipped with reads roll from +Y, so on
+those two units left/right aim came out backwards, and no aim setting can fix
+it: INVERT X flips both directions at once, RECALIBRATE AIM only moves the
+center. The QMI8658's orientation is a per-unit fact.
+
+So the accel→pitch/roll map (which axis feeds which angle, plus a sign each) is
+runtime data, not a constant. It lives in settings next to the other tilt rows
+and is pushed into the IMU task by `gos_settings_apply()`. **The default is the
+original mapping**: a board that was always right stays right and its owner
+never opens the wizard.
+
+The **TILT SETUP** row (TILT GAMES section) runs a three-step wizard:
+
+1. "HOLD THE DEVICE HOW YOU PLAY": tap captures the raw gravity vector.
+2. "TILT THE TOP EDGE TOWARD YOU": the axis that moves ≥0.25 g from that
+   neutral, held ≥1 s, becomes pitch.
+3. "TILT THE LEFT EDGE DOWN": same detection on the remaining axis, sets the
+   roll sign. A gesture landing on the pitch axis again is rejected with
+   "TRY AGAIN" instead of being recorded.
+
+Rules it obeys, all of them from this file: no axis letter or sign ever reaches
+the screen (the user tilts, the OS writes down what it saw), a held gesture
+shows a progress bar so "sustained" is visible, and the swipe-down-from-top
+escape leaves the wizard with the stored map untouched. Both prompts name the
+gesture that must aim **negative** (top edge toward you = aim up; left edge
+down = aim left), so the recorded sign is the negation of the measured delta.
+Each step transition logs one INFO line under `shell`, which is how a wizard
+run gets verified without watching the panel.
+
+RECALIBRATE AIM is unchanged and still the fast path: neutral only, no wizard.
+
 ## `GOS_CAP_TOUCH_FIRE` layout implications
 
 With this cap, any touch in the **lower 2/3** sets `GOS_BTN_FIRE`. So:
