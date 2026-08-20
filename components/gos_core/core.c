@@ -89,8 +89,8 @@ int gos_save_read(gos_ctx_t *ctx, void *out, size_t max)
 // --- settings (sys namespace) ----------------------------------------------
 
 gos_settings_t g_settings = {
-    .version = 1, .aim_mode = GOS_AIM_TILT_ABS, .sensitivity = 1,
-    .volume = 2, .brightness = 4,
+    .version = GOS_SETTINGS_VERSION, .aim_mode = GOS_AIM_TILT_ABS,
+    .sensitivity = 1, .volume = 2, .brightness = 4,
 };
 
 void gos_settings_load(void)
@@ -100,7 +100,7 @@ void gos_settings_load(void)
     gos_settings_t s;
     size_t len = sizeof s;
     if (nvs_get_blob(h, "settings", &s, &len) == ESP_OK &&
-        len == sizeof s && s.version == 1)
+        len == sizeof s && s.version == GOS_SETTINGS_VERSION)
         g_settings = s;
     nvs_close(h);
 }
@@ -124,6 +124,13 @@ void gos_settings_apply(void)
     c->invert_y = g_settings.invert_y;
     gos_audio_master(g_settings.volume);
     hal_display_brightness(g_settings.brightness * 25);
+    // the IMU's mounting orientation is per-unit user data, not a constant
+    hal_imu_axis_map_t map = {
+        .pitch_axis = g_settings.tilt_pitch_axis ? 1 : 0,
+        .pitch_sign = g_settings.tilt_pitch_neg ? -1 : 1,
+        .roll_sign = g_settings.tilt_roll_neg ? -1 : 1,
+    };
+    hal_imu_set_axis_map(&map);
 }
 
 // --- spatial hash grid ------------------------------------------------------

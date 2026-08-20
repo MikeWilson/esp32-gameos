@@ -184,6 +184,15 @@ void gos_input_calibrate_neutral(void)
     fx.init = fy.init = false;
 }
 
+void gos_input_set_neutral(float pitch, float roll)
+{
+    neutral_pitch = pitch;
+    neutral_roll = roll;
+    gyro_aim_x = gyro_aim_y = 0;
+    drag_aim_x = drag_aim_y = 0;
+    fx.init = fy.init = false;
+}
+
 void gos_input_set_aim_config(const gos_aim_cfg_t *c) { cfg = *c; }
 gos_aim_cfg_t *gos_input_aim_config(void) { return &cfg; }
 

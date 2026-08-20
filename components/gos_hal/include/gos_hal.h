@@ -34,6 +34,27 @@ typedef struct {
 bool hal_imu_init(void);
 void hal_imu_get(hal_pose_t *out);
 
+// Accel->angle map. The sensor's mounting orientation varies between units of
+// this board, so the shell's TILT SETUP wizard measures it and pushes the
+// result here; it applies live and is restored from settings at boot. Default
+// (all zero-ish: pitch from accel X, both signs positive) is the mapping the
+// platform shipped with, so units that were already correct need no setup.
+typedef struct {
+    uint8_t pitch_axis;   // 0 = accel X feeds pitch, 1 = accel Y feeds pitch
+    int8_t  pitch_sign;   // +1 / -1
+    int8_t  roll_sign;    // +1 / -1
+} hal_imu_axis_map_t;
+void hal_imu_set_axis_map(const hal_imu_axis_map_t *in);
+void hal_imu_get_axis_map(hal_imu_axis_map_t *out);
+// Angles a given raw accel vector produces under the current map. The wizard
+// uses it to turn the neutral it captured before the map changed into a pose,
+// without asking the user to hold the play position a second time.
+void hal_imu_angles_from_accel(float ax, float ay, float az,
+                               float *pitch, float *roll);
+// Latest raw accel sample (g). Separate from the ring below, which has a
+// single consumer and belongs to games. False if the IMU is absent.
+bool hal_imu_raw_accel(float *ax, float *ay, float *az);
+
 // Raw accel sample ring (g units, wall-clock stamped): the 200 Hz IMU task
 // writes, one consumer drains. Games that need sensor-rate motion data
 // (frame-rate sampling aliases short bursts) read the stream and run their
