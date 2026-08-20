@@ -2,6 +2,7 @@
 // debug overlay, and the per-frame orchestration of the running game.
 #include "gos.h"
 #include "gos_core.h"
+#include <math.h>
 #include <string.h>
 #include "esp_heap_caps.h"
 #include "esp_random.h"
@@ -527,23 +528,34 @@ static void calib_frame(void)
 // left/right (or up/down) backwards on some of them and there is nothing the
 // user can do about it from the aim settings.
 //
-// The wizard asks for two gestures and reads which raw axis moved and which
-// way. It never shows an axis letter or a sign: the user tilts the device the
-// way the screen describes, the OS writes down what it saw.
+// The gesture DEFINES the semantics. The wizard asks for "tilt to aim up" and
+// whatever motion arrives becomes aim-up; it never dictates which way to turn
+// the device, and no axis letter or sign ever reaches the screen. That is also
+// why the arrows in the animation are double-headed: they name the axis to
+// rock, never a direction.
 //
-// Sign convention, and why it is "minus what we measured": both prompts name
-// the gesture that must aim NEGATIVE. Tilting the top edge toward you puts the
-// screen's downhill toward the top edge, which is aim up (pitch < 0); dropping
-// the left edge is aim left (roll < 0). So an axis whose delta went positive
-// during the gesture has to be read negated. On the two units measured
-// 2026-08-19 this reproduces exactly the platform's original pitch<-+ax with
-// roll<-ay, which is the combination those boards need.
-#define TILT_DELTA_G  0.25f    // how far from neutral counts as a deliberate tilt
-#define TILT_HOLD_MS  1000     // ...and how long it must be held there
+// Detection runs in ANGLE space, and that is the whole trick. Held as played
+// the screen is near vertical, so the screen-vertical channel already reads
+// ~0.9 g: rocking further that way moves it about 0.06 g while rocking back
+// moves it half a g. A raw-g threshold is therefore reachable in one direction
+// only, which is exactly what the field reported (the wizard saw one direction
+// and ignored the other). asin of that same channel does not saturate: those
+// 0.06 g are a clean 10 degrees. The two axis angles are also exactly
+// decoupled, since a rotation about one body axis leaves the other channel
+// untouched.
+//
+// The recorded sign is minus the measured one, because each prompt names the
+// gesture that must read NEGATIVE: aim up is negative pitch, aim left is
+// negative roll, under the convention the fusion already publishes (+gy aims
+// down, +gx aims right). The angles measured here use the same atan2 form as
+// the HAL's map_angles(), so what we record is what the fusion will see.
+#define TILT_DELTA_DEG 15.0f   // rotation from neutral that counts as intent
+#define TILT_HOLD_MS   1000    // ...and how long it must be held there
 
 enum { TS_NEUTRAL, TS_PITCH, TS_ROLL, TS_DONE };
 static int ts_step;
 static float ts_nx, ts_ny, ts_nz;      // raw gravity in the play pose
+static float ts_nax, ts_nay;           // ...and its two axis angles, degrees
 static uint8_t ts_pitch_axis;
 static int8_t ts_pitch_sign, ts_roll_sign;
 static int ts_cand_axis = -1;          // axis being held away from neutral
@@ -559,16 +571,89 @@ static void tilt_start(void)
     ESP_LOGI("shell", "tilt setup: start");
 }
 
-// dominant axis of the deflection from neutral, if it is big enough to be
-// intent rather than hand tremor
+// inclination of each accel axis against gravity, degrees
+static void tilt_angles(float ax, float ay, float az, float *angx, float *angy)
+{
+    *angx = atan2f(ax, sqrtf(ay * ay + az * az)) * 57.29578f;
+    *angy = atan2f(ay, sqrtf(ax * ax + az * az)) * 57.29578f;
+}
+
+// dominant axis of the rotation away from neutral, if it is far enough to be
+// intent rather than hand tremor. Direction-agnostic: either way triggers, and
+// which way it went is the answer we are here to record.
 static bool tilt_gesture(float dx, float dy, int *axis, int *sign)
 {
     float mx = dx < 0 ? -dx : dx, my = dy < 0 ? -dy : dy;
     int a = my > mx ? 1 : 0;
-    if ((a ? my : mx) < TILT_DELTA_G) return false;
+    if ((a ? my : mx) < TILT_DELTA_DEG) return false;
     *axis = a;
     *sign = (a ? dy : dx) < 0 ? -1 : 1;
     return true;
+}
+
+// --- the rocking device drawing ---------------------------------------------
+// One quad covers both axes: the roll step rotates it in plane, the pitch step
+// tapers it (top edge nearer or further, the only cue a flat front view has
+// for a rotation it cannot show). GRAY64 ramp and indexed primitives only, no
+// assets. Wall clock drives the rock, never a frame count.
+static void tilt_quad(gos_pt_t p[4], int cx, int cy, int hw, int hh,
+                      int rot256, int taper)
+{
+    int c = gos_cos256((uint8_t)rot256), s = gos_sin256((uint8_t)rot256);
+    static const int lx[4] = { -1, 1, 1, -1 }, ly[4] = { -1, -1, 1, 1 };
+    for (int i = 0; i < 4; i++) {
+        int x = lx[i] * hw * (16384 - taper * ly[i]) / 16384;   // Q14 width
+        int y = ly[i] * hh;
+        p[i].x = (int16_t)(cx + (x * c - y * s) / 16384);
+        p[i].y = (int16_t)(cy + (x * s + y * c) / 16384);
+    }
+}
+
+static void arrow_v(int x, int y0, int y1, gos_color_t c)
+{
+    gos_gfx_vline(x, y0, y1, c);
+    for (int i = 1; i <= 4; i++) {
+        gos_gfx_pixel(x - i, y0 + i, c);
+        gos_gfx_pixel(x + i, y0 + i, c);
+        gos_gfx_pixel(x - i, y1 - i, c);
+        gos_gfx_pixel(x + i, y1 - i, c);
+    }
+}
+
+static void arrow_h(int y, int x0, int x1, gos_color_t c)
+{
+    gos_gfx_hline(x0, x1, y, c);
+    for (int i = 1; i <= 4; i++) {
+        gos_gfx_pixel(x0 + i, y - i, c);
+        gos_gfx_pixel(x0 + i, y + i, c);
+        gos_gfx_pixel(x1 - i, y - i, c);
+        gos_gfx_pixel(x1 - i, y + i, c);
+    }
+}
+
+#define TILT_ART_CY 118
+
+static void tilt_art(int step, uint32_t now)
+{
+    const int cx = GOS_SCREEN_W / 2, hw = 22, hh = 30;
+    int osc = gos_sin256((uint8_t)((now / 9) & 0xFF));   // Q14, ~2.3 s a cycle
+    int rot = 0, taper = 0;
+    if (step == TS_PITCH) taper = osc * 5000 / 16384;    // top edge in and out
+    else if (step == TS_ROLL) rot = osc * 12 / 16384;    // about +-17 degrees
+
+    gos_pt_t body[4], scr[4];
+    tilt_quad(body, cx, TILT_ART_CY, hw, hh, rot, taper);
+    tilt_quad(scr, cx, TILT_ART_CY, hw - 5, hh - 7, rot, taper);
+    for (int i = 0; i < 4; i++) {
+        int j = (i + 1) & 3;
+        gos_gfx_line(body[i].x, body[i].y, body[j].x, body[j].y, UI_TEXT);
+        gos_gfx_line(scr[i].x, scr[i].y, scr[j].x, scr[j].y, UI_DIM);
+    }
+
+    if (step == TS_PITCH)
+        arrow_v(cx + 38, TILT_ART_CY - 22, TILT_ART_CY + 22, UI_TEXT);
+    else if (step == TS_ROLL)
+        arrow_h(TILT_ART_CY + 42, cx - 36, cx + 36, UI_TEXT);
 }
 
 static void tilt_commit(void)
@@ -605,14 +690,18 @@ static void tilt_frame(void)
         // cancel swipe
         if (imu && tap && pt_in(tap_pt, 0, 34, GOS_SCREEN_W, GOS_SCREEN_H - 34)) {
             ts_nx = ax; ts_ny = ay; ts_nz = az;
+            tilt_angles(ax, ay, az, &ts_nax, &ts_nay);
             ts_step = TS_PITCH;
             ts_cand_axis = -1;
-            ESP_LOGI("shell", "tilt setup: neutral %+.2f %+.2f %+.2f",
-                     (double)ax, (double)ay, (double)az);
+            ESP_LOGI("shell", "tilt setup: neutral %+.2f %+.2f %+.2f "
+                     "(%+.1f %+.1f deg)", (double)ax, (double)ay, (double)az,
+                     (double)ts_nax, (double)ts_nay);
         }
     } else if (ts_step != TS_DONE) {
         int axis, sign;
-        if (imu && tilt_gesture(ax - ts_nx, ay - ts_ny, &axis, &sign)) {
+        float angx, angy;
+        tilt_angles(ax, ay, az, &angx, &angy);
+        if (imu && tilt_gesture(angx - ts_nax, angy - ts_nay, &axis, &sign)) {
             bool fresh = axis != ts_cand_axis || sign != ts_cand_sign;
             if (fresh) {
                 ts_cand_axis = axis;
@@ -625,16 +714,19 @@ static void tilt_frame(void)
                 ts_msg_ms = now;
                 if (fresh) ESP_LOGI("shell", "tilt setup: same axis as pitch, retry");
             } else if (now - ts_cand_ms >= TILT_HOLD_MS) {
+                float d = axis ? angy - ts_nay : angx - ts_nax;
                 if (ts_step == TS_PITCH) {
                     ts_pitch_axis = (uint8_t)axis;
                     ts_pitch_sign = (int8_t)-sign;
-                    ESP_LOGI("shell", "tilt setup: pitch <- %c accel %c",
+                    ESP_LOGI("shell", "tilt setup: aim up moved accel %c %+.0f deg,"
+                             " pitch <- %c accel %c", axis ? 'Y' : 'X', (double)d,
                              ts_pitch_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
                     ts_step = TS_ROLL;
                     ts_cand_axis = -1;
                 } else {
                     ts_roll_sign = (int8_t)-sign;
-                    ESP_LOGI("shell", "tilt setup: roll <- %c accel %c",
+                    ESP_LOGI("shell", "tilt setup: aim left moved accel %c %+.0f deg,"
+                             " roll <- %c accel %c", axis ? 'Y' : 'X', (double)d,
                              ts_roll_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
                     tilt_commit();
                     ts_step = TS_DONE;
@@ -651,37 +743,44 @@ static void tilt_frame(void)
         return;
     }
 
+    // The prompts name an outcome, not a motion: whatever the user does to
+    // "aim up" becomes aim up on their unit.
     static const char *lines[4][3] = {
         { "HOLD THE", "DEVICE HOW", "YOU PLAY" },
-        { "TILT THE", "TOP EDGE", "TOWARD YOU" },
-        { "TILT THE", "LEFT EDGE", "DOWN" },
+        { "TILT TO", "AIM UP", NULL },
+        { "TILT TO", "AIM LEFT", NULL },
         { "DONE", NULL, NULL },
     };
     if (ts_step != TS_DONE)
         gos_gfx_text(0, 8, 14, UI_DIM, "TILT SETUP  %d/3", ts_step + 1);
+    int hy = ts_step == TS_DONE ? 100 : 28;   // nothing else on the DONE screen
     for (int i = 0; i < 3; i++) {
         const char *s = lines[ts_step][i];
         if (!s) break;
         int w = gos_gfx_text_w(1, s);
-        gos_gfx_text(1, GOS_SCREEN_W / 2 - w / 2, 60 + i * 18, UI_TEXT, "%s", s);
+        gos_gfx_text(1, GOS_SCREEN_W / 2 - w / 2, hy + i * 18, UI_TEXT, "%s", s);
     }
 
+    if (ts_step != TS_DONE) tilt_art(ts_step, now);
+
     if (ts_step == TS_NEUTRAL) {
-        gos_gfx_text(0, 34, 140, GOS_GRAY64(0), "TAP TO SET CENTER");
+        int w = gos_gfx_text_w(0, "TAP TO SET CENTER");
+        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 174, GOS_GRAY64(0),
+                     "TAP TO SET CENTER");
     } else if (ts_step != TS_DONE) {
         const char *hint = now - ts_msg_ms < 900 ? "TRY AGAIN"
-                                                 : "AND HOLD IT THERE";
+                                                 : "ANY WAY YOU LIKE, THEN HOLD";
         int w = gos_gfx_text_w(0, hint);
-        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 140, GOS_GRAY64(0), "%s", hint);
+        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 174, GOS_GRAY64(0), "%s", hint);
         // the hold bar makes "sustained" visible instead of mysterious
-        gos_gfx_rect_fill((gos_rect_t){ 10, 158, 164, 4 }, UI_EMPTY);
+        gos_gfx_rect_fill((gos_rect_t){ 10, 188, 164, 4 }, UI_EMPTY);
         if (progress > 0)
-            gos_gfx_rect_fill((gos_rect_t){ 10, 158,
+            gos_gfx_rect_fill((gos_rect_t){ 10, 188,
                                             (int16_t)(164 * progress / 100), 4 },
                               GOS_GRAY64(0));
     }
 
-    if (!imu) gos_gfx_text(0, 46, 176, UI_DIM, "NO MOTION SENSOR");
+    if (!imu) gos_gfx_text(0, 46, 196, UI_DIM, "NO MOTION SENSOR");
     if (ts_step != TS_DONE)
         gos_gfx_text(0, 8, GOS_SCREEN_H - 14, UI_DIM,
                      "SWIPE DOWN FROM TOP = EXIT");

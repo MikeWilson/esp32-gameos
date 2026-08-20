@@ -96,18 +96,32 @@ never opens the wizard.
 The **TILT SETUP** row (TILT GAMES section) runs a three-step wizard:
 
 1. "HOLD THE DEVICE HOW YOU PLAY": tap captures the raw gravity vector.
-2. "TILT THE TOP EDGE TOWARD YOU": the axis that moves ≥0.25 g from that
-   neutral, held ≥1 s, becomes pitch.
-3. "TILT THE LEFT EDGE DOWN": same detection on the remaining axis, sets the
-   roll sign. A gesture landing on the pitch axis again is rejected with
-   "TRY AGAIN" instead of being recorded.
+2. "TILT TO AIM UP": the axis that rotates ≥15° from that neutral, held ≥1 s,
+   becomes pitch.
+3. "TILT TO AIM LEFT": same detection on the remaining axis, sets the roll
+   sign. A gesture landing on the pitch axis again is rejected with "TRY AGAIN"
+   instead of being recorded.
+
+**The gesture defines the semantics.** The prompts name an outcome, never a
+motion: whatever the user does to aim up becomes aim up on their unit. That is
+why the animation's arrows are double-headed, and why the hint reads "ANY WAY
+YOU LIKE, THEN HOLD". Each prompt names the gesture that must read **negative**
+(aim up = negative pitch, aim left = negative roll), so the recorded sign is
+the negation of the measured delta.
+
+**Detect in angle space, never in raw g.** Held as played the screen is near
+vertical, so the screen-vertical channel already reads ~0.9 g: rocking further
+that way moves it ~0.06 g while rocking back moves it half a g. A raw-g
+threshold is reachable in one direction only, and the first build shipped that
+bug (the wizard saw one direction and ignored the other). `asin` of the same
+channel does not saturate: those 0.06 g are a clean 10°. The two axis angles
+are exactly decoupled too, since rotating about one body axis leaves the other
+channel untouched.
 
 Rules it obeys, all of them from this file: no axis letter or sign ever reaches
-the screen (the user tilts, the OS writes down what it saw), a held gesture
-shows a progress bar so "sustained" is visible, and the swipe-down-from-top
-escape leaves the wizard with the stored map untouched. Both prompts name the
-gesture that must aim **negative** (top edge toward you = aim up; left edge
-down = aim left), so the recorded sign is the negation of the measured delta.
+the screen, a held gesture shows a progress bar so "sustained" is visible, the
+device animation is indexed primitives on the GRAY64 ramp with no assets, and
+the swipe-down-from-top escape leaves the wizard with the stored map untouched.
 Each step transition logs one INFO line under `shell`, which is how a wizard
 run gets verified without watching the panel.
 
