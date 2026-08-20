@@ -93,6 +93,10 @@ and is pushed into the IMU task by `gos_settings_apply()`. **The default is the
 original mapping**: a board that was always right stays right and its owner
 never opens the wizard.
 
+![TILT SETUP wizard](../media/tilt-setup.gif)
+
+*Host-sim capture: the real `shell.c` under a scripted gravity vector.*
+
 The **TILT SETUP** row (TILT GAMES section) runs a three-step wizard:
 
 1. "HOLD THE DEVICE HOW YOU PLAY": tap captures the raw gravity vector.
