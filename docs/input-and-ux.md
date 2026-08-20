@@ -100,7 +100,9 @@ The **TILT SETUP** row (TILT GAMES section) runs a three-step wizard:
    becomes pitch.
 3. "TILT TO AIM LEFT": same detection on the remaining axis, sets the roll
    sign. A gesture landing on the pitch axis again is rejected with "TRY AGAIN"
-   instead of being recorded.
+   instead of being recorded. Step 3 starts watching only once the device is
+   back near neutral, so unwinding step 2's own tilt is never read as an answer
+   (it used to trip that rejection on the way back).
 
 **The gesture defines the semantics.** The prompts name an outcome, never a
 motion: whatever the user does to aim up becomes aim up on their unit. That is

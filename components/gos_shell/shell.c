@@ -562,12 +562,17 @@ static int ts_cand_axis = -1;          // axis being held away from neutral
 static int ts_cand_sign;
 static uint32_t ts_cand_ms;            // when this candidate started
 static uint32_t ts_msg_ms;             // TRY AGAIN flash / DONE dwell
+// Step 3 only starts watching once the device is back near neutral. Without
+// this the tail of step 2's own gesture, which the user has to unwind through,
+// reads as "wrong axis" and lights a TRY AGAIN nobody can avoid.
+static bool ts_armed;
 
 static void tilt_start(void)
 {
     ts_step = TS_NEUTRAL;
     ts_cand_axis = -1;
     ts_msg_ms = 0;
+    ts_armed = true;
     ESP_LOGI("shell", "tilt setup: start");
 }
 
@@ -701,7 +706,11 @@ static void tilt_frame(void)
         int axis, sign;
         float angx, angy;
         tilt_angles(ax, ay, az, &angx, &angy);
-        if (imu && tilt_gesture(angx - ts_nax, angy - ts_nay, &axis, &sign)) {
+        bool moved = imu && tilt_gesture(angx - ts_nax, angy - ts_nay, &axis, &sign);
+        if (!moved) {
+            ts_cand_axis = -1;
+            ts_armed = true;      // back near neutral, watch again
+        } else if (ts_armed) {
             bool fresh = axis != ts_cand_axis || sign != ts_cand_sign;
             if (fresh) {
                 ts_cand_axis = axis;
@@ -723,6 +732,7 @@ static void tilt_frame(void)
                              ts_pitch_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
                     ts_step = TS_ROLL;
                     ts_cand_axis = -1;
+                    ts_armed = false;   // let them unwind this one first
                 } else {
                     ts_roll_sign = (int8_t)-sign;
                     ESP_LOGI("shell", "tilt setup: aim left moved accel %c %+.0f deg,"
@@ -736,7 +746,7 @@ static void tilt_frame(void)
                 progress = (int)((now - ts_cand_ms) * 100 / TILT_HOLD_MS);
             }
         } else {
-            ts_cand_axis = -1;
+            ts_cand_axis = -1;   // still unwinding step 2, nothing to read yet
         }
     } else if (now - ts_msg_ms > 900) {
         mode = SH_SETTINGS;     // only ever entered from settings
