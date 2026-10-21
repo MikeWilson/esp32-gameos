@@ -15,6 +15,10 @@ procedural.
 |---|---|---|---|
 | ![launcher](media/launcher.png) | ![gunship](media/gunship.png) | ![golf](media/golf.png) | ![aiming](media/golf-aiming.png) |
 
+| Harvest | Harvest: field clear |
+|---|---|
+| ![harvest](media/harvest.png) | ![harvest clear](media/harvest-clear.png) |
+
 *(Frames rendered by the host simulator — pixel-identical to the device.)*
 
 ## The games
@@ -27,6 +31,11 @@ procedural.
   device (IMU stroke integration), 18-hole rounds, pass-and-play for 2-4,
   leaderboard. Full-res RGB565 with real Montserrat type.
 - **SLOTS** — a palette-trickery slot machine with a physical pull gesture.
+- **HARVEST** — a zen isometric combine. Tilt where you want it to go
+  (marble-on-a-plane steering) and mow a wheat field into satisfying
+  striped rows. 2.5D relief rendering (standing wheat is visibly taller than
+  the stubble you leave), wind gusts that travel across the crop in the
+  renderer, endless fields that grow ponds and tree stands.
 - **DIAG / AIM TEST** — built-in hardware diagnostics and the tilt-aim
   latency test harness.
 
@@ -61,7 +70,7 @@ components/
   gos_hal/             display, touch, IMU fusion, audio, power, button
   gos_core/            gfx, fonts, input, mixer, save, rng, grid, loop
   gos_shell/           launcher, settings, pause overlay, calibration, registry
-  games/               gunship, golf, slots (+ diag/aimtest in shell)
+  games/               gunship, golf, slots, harvest (+ diag/aimtest in shell)
 docs/                  the platform book: hardware traps, game contract,
                        rendering, input/UX rules, audio, verification,
                        design playbook
