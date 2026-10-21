@@ -2,6 +2,7 @@
 // debug overlay, and the per-frame orchestration of the running game.
 #include "gos.h"
 #include "gos_core.h"
+#include <math.h>
 #include <string.h>
 #include "esp_heap_caps.h"
 #include "esp_random.h"
@@ -10,7 +11,8 @@
 #include "nvs_flash.h"
 #include "gos_hal.h"
 
-typedef enum { SH_GRID, SH_SETTINGS, SH_RUNNING, SH_OVERLAY, SH_CALIB } sh_mode_t;
+typedef enum { SH_GRID, SH_SETTINGS, SH_RUNNING, SH_OVERLAY, SH_CALIB,
+               SH_TILT } sh_mode_t;
 
 static sh_mode_t mode = SH_GRID;
 static sh_mode_t calib_return = SH_GRID;   // where the wizard goes on done
@@ -346,6 +348,8 @@ void settings_reset_view(void)
     reset_hold = 0;
 }
 
+static void tilt_start(void);   // the TILT SETUP wizard, below
+
 static void settings_frame(void)
 {
     static const char *aim_names[] = { "TILT", "GYRO", "TOUCH" };
@@ -356,7 +360,7 @@ static void settings_frame(void)
     // first; the shared tilt-aim service sits under its own header (it read
     // as gunship leftovers otherwise — user-reported)
     enum { R_VOLUME, R_BRIGHT, R_HDR, R_AIM, R_SENS, R_INVY, R_INVX,
-           R_CALIB, R_RESET, R_COUNT };
+           R_TILT, R_CALIB, R_RESET, R_COUNT };
     struct { const char *label; char val[12]; } rows[R_COUNT];
     rows[R_VOLUME].label = "VOLUME";
     snprintf(rows[R_VOLUME].val, 12, "%s", vol_names[g_settings.volume % 4]);
@@ -372,6 +376,8 @@ static void settings_frame(void)
     snprintf(rows[R_INVY].val, 12, "%s", g_settings.invert_y ? "ON" : "OFF");
     rows[R_INVX].label = "INVERT X";
     snprintf(rows[R_INVX].val, 12, "%s", g_settings.invert_x ? "ON" : "OFF");
+    rows[R_TILT].label = "TILT SETUP";
+    rows[R_TILT].val[0] = 0;
     rows[R_CALIB].label = "RECALIBRATE AIM";
     rows[R_CALIB].val[0] = 0;
     rows[R_RESET].label = "FACTORY RESET";
@@ -458,12 +464,16 @@ static void settings_frame(void)
             case R_SENS: g_settings.sensitivity = (g_settings.sensitivity + 1) % 3; break;
             case R_INVY: g_settings.invert_y ^= 1; break;
             case R_INVX: g_settings.invert_x ^= 1; break;
+            case R_TILT:
+                tilt_start();
+                mode = SH_TILT;
+                break;
             case R_CALIB:
                 calib_return = SH_SETTINGS;
                 mode = SH_CALIB;
                 break;
             }
-            if (i != R_CALIB) {
+            if (i != R_CALIB && i != R_TILT) {
                 gos_settings_save();
                 gos_settings_apply();
             }
@@ -510,6 +520,280 @@ static void calib_frame(void)
         if (calib_return == SH_RUNNING && cur) cur->resume(&ctx);
         mode = calib_return;
     }
+}
+
+// --- TILT SETUP -------------------------------------------------------------
+// Teaches the OS how the accelerometer sits inside THIS unit. The part is not
+// mounted the same way on every board of this model, so a fixed mapping aims
+// left/right (or up/down) backwards on some of them and there is nothing the
+// user can do about it from the aim settings.
+//
+// The gesture DEFINES the semantics. The wizard asks for "tilt to aim up" and
+// whatever motion arrives becomes aim-up; it never dictates which way to turn
+// the device, and no axis letter or sign ever reaches the screen. That is also
+// why the arrows in the animation are double-headed: they name the axis to
+// rock, never a direction.
+//
+// Detection runs in ANGLE space, and that is the whole trick. Held as played
+// the screen is near vertical, so the screen-vertical channel already reads
+// ~0.9 g: rocking further that way moves it about 0.06 g while rocking back
+// moves it half a g. A raw-g threshold is therefore reachable in one direction
+// only, which is exactly what the field reported (the wizard saw one direction
+// and ignored the other). asin of that same channel does not saturate: those
+// 0.06 g are a clean 10 degrees. The two axis angles are also exactly
+// decoupled, since a rotation about one body axis leaves the other channel
+// untouched.
+//
+// The recorded sign is minus the measured one, because each prompt names the
+// gesture that must read NEGATIVE: aim up is negative pitch, aim left is
+// negative roll, under the convention the fusion already publishes (+gy aims
+// down, +gx aims right). The angles measured here use the same atan2 form as
+// the HAL's map_angles(), so what we record is what the fusion will see.
+#define TILT_DELTA_DEG 15.0f   // rotation from neutral that counts as intent
+#define TILT_HOLD_MS   1000    // ...and how long it must be held there
+
+enum { TS_NEUTRAL, TS_PITCH, TS_ROLL, TS_DONE };
+static int ts_step;
+static float ts_nx, ts_ny, ts_nz;      // raw gravity in the play pose
+static float ts_nax, ts_nay;           // ...and its two axis angles, degrees
+static uint8_t ts_pitch_axis;
+static int8_t ts_pitch_sign, ts_roll_sign;
+static int ts_cand_axis = -1;          // axis being held away from neutral
+static int ts_cand_sign;
+static uint32_t ts_cand_ms;            // when this candidate started
+static uint32_t ts_msg_ms;             // TRY AGAIN flash / DONE dwell
+// Step 3 only starts watching once the device is back near neutral. Without
+// this the tail of step 2's own gesture, which the user has to unwind through,
+// reads as "wrong axis" and lights a TRY AGAIN nobody can avoid.
+static bool ts_armed;
+
+static void tilt_start(void)
+{
+    ts_step = TS_NEUTRAL;
+    ts_cand_axis = -1;
+    ts_msg_ms = 0;
+    ts_armed = true;
+    ESP_LOGI("shell", "tilt setup: start");
+}
+
+// inclination of each accel axis against gravity, degrees
+static void tilt_angles(float ax, float ay, float az, float *angx, float *angy)
+{
+    *angx = atan2f(ax, sqrtf(ay * ay + az * az)) * 57.29578f;
+    *angy = atan2f(ay, sqrtf(ax * ax + az * az)) * 57.29578f;
+}
+
+// dominant axis of the rotation away from neutral, if it is far enough to be
+// intent rather than hand tremor. Direction-agnostic: either way triggers, and
+// which way it went is the answer we are here to record.
+static bool tilt_gesture(float dx, float dy, int *axis, int *sign)
+{
+    float mx = dx < 0 ? -dx : dx, my = dy < 0 ? -dy : dy;
+    int a = my > mx ? 1 : 0;
+    if ((a ? my : mx) < TILT_DELTA_DEG) return false;
+    *axis = a;
+    *sign = (a ? dy : dx) < 0 ? -1 : 1;
+    return true;
+}
+
+// --- the rocking device drawing ---------------------------------------------
+// One quad covers both axes: the roll step rotates it in plane, the pitch step
+// tapers it (top edge nearer or further, the only cue a flat front view has
+// for a rotation it cannot show). GRAY64 ramp and indexed primitives only, no
+// assets. Wall clock drives the rock, never a frame count.
+static void tilt_quad(gos_pt_t p[4], int cx, int cy, int hw, int hh,
+                      int rot256, int taper)
+{
+    int c = gos_cos256((uint8_t)rot256), s = gos_sin256((uint8_t)rot256);
+    static const int lx[4] = { -1, 1, 1, -1 }, ly[4] = { -1, -1, 1, 1 };
+    for (int i = 0; i < 4; i++) {
+        int x = lx[i] * hw * (16384 - taper * ly[i]) / 16384;   // Q14 width
+        int y = ly[i] * hh;
+        p[i].x = (int16_t)(cx + (x * c - y * s) / 16384);
+        p[i].y = (int16_t)(cy + (x * s + y * c) / 16384);
+    }
+}
+
+static void arrow_v(int x, int y0, int y1, gos_color_t c)
+{
+    gos_gfx_vline(x, y0, y1, c);
+    for (int i = 1; i <= 4; i++) {
+        gos_gfx_pixel(x - i, y0 + i, c);
+        gos_gfx_pixel(x + i, y0 + i, c);
+        gos_gfx_pixel(x - i, y1 - i, c);
+        gos_gfx_pixel(x + i, y1 - i, c);
+    }
+}
+
+static void arrow_h(int y, int x0, int x1, gos_color_t c)
+{
+    gos_gfx_hline(x0, x1, y, c);
+    for (int i = 1; i <= 4; i++) {
+        gos_gfx_pixel(x0 + i, y - i, c);
+        gos_gfx_pixel(x0 + i, y + i, c);
+        gos_gfx_pixel(x1 - i, y - i, c);
+        gos_gfx_pixel(x1 - i, y + i, c);
+    }
+}
+
+#define TILT_ART_CY 118
+
+static void tilt_art(int step, uint32_t now)
+{
+    const int cx = GOS_SCREEN_W / 2, hw = 22, hh = 30;
+    int osc = gos_sin256((uint8_t)((now / 9) & 0xFF));   // Q14, ~2.3 s a cycle
+    int rot = 0, taper = 0;
+    if (step == TS_PITCH) taper = osc * 5000 / 16384;    // top edge in and out
+    else if (step == TS_ROLL) rot = osc * 12 / 16384;    // about +-17 degrees
+
+    gos_pt_t body[4], scr[4];
+    tilt_quad(body, cx, TILT_ART_CY, hw, hh, rot, taper);
+    tilt_quad(scr, cx, TILT_ART_CY, hw - 5, hh - 7, rot, taper);
+    for (int i = 0; i < 4; i++) {
+        int j = (i + 1) & 3;
+        gos_gfx_line(body[i].x, body[i].y, body[j].x, body[j].y, UI_TEXT);
+        gos_gfx_line(scr[i].x, scr[i].y, scr[j].x, scr[j].y, UI_DIM);
+    }
+
+    if (step == TS_PITCH)
+        arrow_v(cx + 38, TILT_ART_CY - 22, TILT_ART_CY + 22, UI_TEXT);
+    else if (step == TS_ROLL)
+        arrow_h(TILT_ART_CY + 42, cx - 36, cx + 36, UI_TEXT);
+}
+
+static void tilt_commit(void)
+{
+    g_settings.tilt_pitch_axis = ts_pitch_axis;
+    g_settings.tilt_pitch_neg = ts_pitch_sign < 0;
+    g_settings.tilt_roll_neg = ts_roll_sign < 0;
+    g_settings.calibrated = 1;
+    gos_settings_save();
+    gos_settings_apply();      // pushes the map into the running IMU task
+    // The neutral was captured before the map existed, so convert that raw
+    // vector rather than asking the user to hold the play pose a second time
+    // (they are holding the device tilted at this exact moment).
+    float p, r;
+    hal_imu_angles_from_accel(ts_nx, ts_ny, ts_nz, &p, &r);
+    gos_input_set_neutral(p, r);
+    gos_input_save_neutral(cur ? cur->id : "sys");
+    ESP_LOGI("shell", "tilt setup: saved, neutral P%+.1f R%+.1f",
+             (double)p, (double)r);
+}
+
+static void tilt_frame(void)
+{
+    // GRAY64 ramp only, same rule as calib_frame
+    gos_gfx_clear(UI_BG);
+
+    float ax = 0, ay = 0, az = 0;
+    bool imu = hal_imu_raw_accel(&ax, &ay, &az);
+    uint32_t now = gos_time_ms();
+    int progress = 0;      // hold bar, 0..100
+
+    if (ts_step == TS_NEUTRAL) {
+        // release-tap, and not in the top strip: that band belongs to the
+        // cancel swipe
+        if (imu && tap && pt_in(tap_pt, 0, 34, GOS_SCREEN_W, GOS_SCREEN_H - 34)) {
+            ts_nx = ax; ts_ny = ay; ts_nz = az;
+            tilt_angles(ax, ay, az, &ts_nax, &ts_nay);
+            ts_step = TS_PITCH;
+            ts_cand_axis = -1;
+            ESP_LOGI("shell", "tilt setup: neutral %+.2f %+.2f %+.2f "
+                     "(%+.1f %+.1f deg)", (double)ax, (double)ay, (double)az,
+                     (double)ts_nax, (double)ts_nay);
+        }
+    } else if (ts_step != TS_DONE) {
+        int axis, sign;
+        float angx, angy;
+        tilt_angles(ax, ay, az, &angx, &angy);
+        bool moved = imu && tilt_gesture(angx - ts_nax, angy - ts_nay, &axis, &sign);
+        if (!moved) {
+            ts_cand_axis = -1;
+            ts_armed = true;      // back near neutral, watch again
+        } else if (ts_armed) {
+            bool fresh = axis != ts_cand_axis || sign != ts_cand_sign;
+            if (fresh) {
+                ts_cand_axis = axis;
+                ts_cand_sign = sign;
+                ts_cand_ms = now;
+            }
+            if (ts_step == TS_ROLL && axis == ts_pitch_axis) {
+                // the second gesture has to move the OTHER axis, or we learn
+                // nothing about roll
+                ts_msg_ms = now;
+                if (fresh) ESP_LOGI("shell", "tilt setup: same axis as pitch, retry");
+            } else if (now - ts_cand_ms >= TILT_HOLD_MS) {
+                float d = axis ? angy - ts_nay : angx - ts_nax;
+                if (ts_step == TS_PITCH) {
+                    ts_pitch_axis = (uint8_t)axis;
+                    ts_pitch_sign = (int8_t)-sign;
+                    ESP_LOGI("shell", "tilt setup: aim up moved accel %c %+.0f deg,"
+                             " pitch <- %c accel %c", axis ? 'Y' : 'X', (double)d,
+                             ts_pitch_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
+                    ts_step = TS_ROLL;
+                    ts_cand_axis = -1;
+                    ts_armed = false;   // let them unwind this one first
+                } else {
+                    ts_roll_sign = (int8_t)-sign;
+                    ESP_LOGI("shell", "tilt setup: aim left moved accel %c %+.0f deg,"
+                             " roll <- %c accel %c", axis ? 'Y' : 'X', (double)d,
+                             ts_roll_sign < 0 ? '-' : '+', axis ? 'Y' : 'X');
+                    tilt_commit();
+                    ts_step = TS_DONE;
+                    ts_msg_ms = now;
+                }
+            } else {
+                progress = (int)((now - ts_cand_ms) * 100 / TILT_HOLD_MS);
+            }
+        } else {
+            ts_cand_axis = -1;   // still unwinding step 2, nothing to read yet
+        }
+    } else if (now - ts_msg_ms > 900) {
+        mode = SH_SETTINGS;     // only ever entered from settings
+        return;
+    }
+
+    // The prompts name an outcome, not a motion: whatever the user does to
+    // "aim up" becomes aim up on their unit.
+    static const char *lines[4][3] = {
+        { "HOLD THE", "DEVICE HOW", "YOU PLAY" },
+        { "TILT TO", "AIM UP", NULL },
+        { "TILT TO", "AIM LEFT", NULL },
+        { "DONE", NULL, NULL },
+    };
+    if (ts_step != TS_DONE)
+        gos_gfx_text(0, 8, 14, UI_DIM, "TILT SETUP  %d/3", ts_step + 1);
+    int hy = ts_step == TS_DONE ? 100 : 28;   // nothing else on the DONE screen
+    for (int i = 0; i < 3; i++) {
+        const char *s = lines[ts_step][i];
+        if (!s) break;
+        int w = gos_gfx_text_w(1, s);
+        gos_gfx_text(1, GOS_SCREEN_W / 2 - w / 2, hy + i * 18, UI_TEXT, "%s", s);
+    }
+
+    if (ts_step != TS_DONE) tilt_art(ts_step, now);
+
+    if (ts_step == TS_NEUTRAL) {
+        int w = gos_gfx_text_w(0, "TAP TO SET CENTER");
+        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 174, GOS_GRAY64(0),
+                     "TAP TO SET CENTER");
+    } else if (ts_step != TS_DONE) {
+        const char *hint = now - ts_msg_ms < 900 ? "TRY AGAIN"
+                                                 : "ANY WAY YOU LIKE, THEN HOLD";
+        int w = gos_gfx_text_w(0, hint);
+        gos_gfx_text(0, GOS_SCREEN_W / 2 - w / 2, 174, GOS_GRAY64(0), "%s", hint);
+        // the hold bar makes "sustained" visible instead of mysterious
+        gos_gfx_rect_fill((gos_rect_t){ 10, 188, 164, 4 }, UI_EMPTY);
+        if (progress > 0)
+            gos_gfx_rect_fill((gos_rect_t){ 10, 188,
+                                            (int16_t)(164 * progress / 100), 4 },
+                              GOS_GRAY64(0));
+    }
+
+    if (!imu) gos_gfx_text(0, 46, 196, UI_DIM, "NO MOTION SENSOR");
+    if (ts_step != TS_DONE)
+        gos_gfx_text(0, 8, GOS_SCREEN_H - 14, UI_DIM,
+                     "SWIPE DOWN FROM TOP = EXIT");
 }
 
 static void overlay_frame(const gos_input_t *in)
@@ -623,11 +907,19 @@ void shell_frame(const gos_input_t *in_ro, int n_updates)
     // Generous start zone: a real swipe-in from the bezel often first
     // registers well below the physical edge.
     if (!in.touching) swipe_armed = true;
-    if (mode == SH_RUNNING && swipe_armed && in.touching && t_press.y < 30 &&
-        in.touch.y - t_press.y > 30) {
+    bool swipe_down = swipe_armed && in.touching && t_press.y < 30 &&
+                      in.touch.y - t_press.y > 30;
+    if (mode == SH_RUNNING && swipe_down) {
         ESP_LOGI("shell", "pause via swipe");
         cur->suspend(&ctx);
         mode = SH_OVERLAY;
+    } else if (mode == SH_TILT && swipe_down) {
+        // the setup wizard is a screen like any other: the universal escape
+        // gets out of it, leaving the stored map untouched
+        ESP_LOGI("shell", "tilt setup: exit via swipe");
+        tap = false;   // this contact's release must not also hit a settings row
+        press_consumed = true;
+        mode = SH_SETTINGS;
     }
 
     // BOOT (game button A): games see raw press/release edges. The shell
@@ -665,6 +957,7 @@ void shell_frame(const gos_input_t *in_ro, int n_updates)
     case SH_GRID: grid_frame(); break;
     case SH_SETTINGS: settings_frame(); break;
     case SH_CALIB: calib_frame(); break;
+    case SH_TILT: tilt_frame(); break;
     case SH_OVERLAY: overlay_frame(&in); break;
     case SH_RUNNING: {
         if (!(cur->caps & GOS_CAP_TOUCH_FIRE)) {

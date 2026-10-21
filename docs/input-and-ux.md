@@ -78,6 +78,73 @@ Tips:
   for one can't trigger its neighbor.
 - Yaw does not exist. Design aiming around pitch/roll only.
 
+## TILT SETUP: the sensor is not mounted the same way on every unit
+
+**Measured 2026-08-19 on two ESP32-S3-Touch-AMOLED-1.8 boards, and again
+2026-10-21 on a third with a virgin NVS: held as played, gravity lands on accel
++X, and dropping the LEFT edge drives accel Y positive.** The mapping the
+platform shipped with reads roll from `+Y`, so on all three units left/right
+aim came out backwards.
+
+That makes it a **wrong default, not per-unit variance** — three for three is a
+board fact, and the fix is the sign in the default map. It had hidden because
+`INVERT X` does cancel it (it negates `aim_x` alone), so an owner who flipped
+that row once had a correct-aiming unit forever and never saw the bug again.
+`RECALIBRATE AIM` does not help: it only moves the center.
+
+The accel→pitch/roll map (which axis feeds which angle, plus a sign each) is
+nonetheless runtime data rather than a constant. It lives in settings next to
+the other tilt rows and is pushed into the IMU task by `gos_settings_apply()`.
+**The default is the measured-correct mapping** (`pitch<-+ax`, `roll<--ay`), so
+a stock board aims correctly out of the box and nobody has to open the wizard.
+The wizard is kept for the unit that genuinely is mounted differently — if a
+future board revision moves the part, it is already handled.
+
+Upgrading from a v1 settings blob migrates the other fields but deliberately
+**drops a stored `INVERT X`**: under v1 that toggle was the only way to correct
+the hardware, so an ON there meant "compensated by hand", and carrying it onto
+the corrected default would invert aim right back.
+
+![TILT SETUP wizard](../media/tilt-setup.gif)
+
+*Host-sim capture: the real `shell.c` under a scripted gravity vector.*
+
+The **TILT SETUP** row (TILT GAMES section) runs a three-step wizard:
+
+1. "HOLD THE DEVICE HOW YOU PLAY": tap captures the raw gravity vector.
+2. "TILT TO AIM UP": the axis that rotates ≥15° from that neutral, held ≥1 s,
+   becomes pitch.
+3. "TILT TO AIM LEFT": same detection on the remaining axis, sets the roll
+   sign. A gesture landing on the pitch axis again is rejected with "TRY AGAIN"
+   instead of being recorded. Step 3 starts watching only once the device is
+   back near neutral, so unwinding step 2's own tilt is never read as an answer
+   (it used to trip that rejection on the way back).
+
+**The gesture defines the semantics.** The prompts name an outcome, never a
+motion: whatever the user does to aim up becomes aim up on their unit. That is
+why the animation's arrows are double-headed, and why the hint reads "ANY WAY
+YOU LIKE, THEN HOLD". Each prompt names the gesture that must read **negative**
+(aim up = negative pitch, aim left = negative roll), so the recorded sign is
+the negation of the measured delta.
+
+**Detect in angle space, never in raw g.** Held as played the screen is near
+vertical, so the screen-vertical channel already reads ~0.9 g: rocking further
+that way moves it ~0.06 g while rocking back moves it half a g. A raw-g
+threshold is reachable in one direction only, and the first build shipped that
+bug (the wizard saw one direction and ignored the other). `asin` of the same
+channel does not saturate: those 0.06 g are a clean 10°. The two axis angles
+are exactly decoupled too, since rotating about one body axis leaves the other
+channel untouched.
+
+Rules it obeys, all of them from this file: no axis letter or sign ever reaches
+the screen, a held gesture shows a progress bar so "sustained" is visible, the
+device animation is indexed primitives on the GRAY64 ramp with no assets, and
+the swipe-down-from-top escape leaves the wizard with the stored map untouched.
+Each step transition logs one INFO line under `shell`, which is how a wizard
+run gets verified without watching the panel.
+
+RECALIBRATE AIM is unchanged and still the fast path: neutral only, no wizard.
+
 ## `GOS_CAP_TOUCH_FIRE` layout implications
 
 With this cap, any touch in the **lower 2/3** sets `GOS_BTN_FIRE`. So:

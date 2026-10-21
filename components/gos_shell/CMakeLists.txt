@@ -2,7 +2,7 @@
 # absent from a checkout (they are pulled from the public tree until ready):
 # any game listed here is included only if its component directory exists,
 # and registry.c guards its entry on the matching GOS_HAVE_<NAME> define.
-set(GAME_DEPS gunship golf slots)
+set(GAME_DEPS gunship golf slots harvest)
 set(GAME_DEFS "")
 foreach(wip bomber)
     if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/../games/${wip})

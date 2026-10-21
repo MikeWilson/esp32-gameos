@@ -55,12 +55,17 @@ actively wrong for this board.
 - Read with `qmi8658_read_accel` / `qmi8658_read_gyro` (defaults are mg/dps).
   The component's `_mg`/`_dps` variants are **declared but not implemented** —
   linking against them fails or worse.
-- **Axis truth (user-verified on device):** accel **Y runs along the screen's
-  horizontal**, X along the vertical. So:
+- **Axis truth (measured on three units):** accel **Y runs along the screen's
+  horizontal and +Y points screen LEFT**, X along the vertical. So:
   - pitch (screen-vertical aim) = `atan2f(ax, …)`
-  - roll (screen-horizontal aim) = `atan2f(ay, …)`
+  - roll (screen-horizontal aim) = `atan2f(-ay, …)` — **note the sign**
   - gyro pairs: pitch↔gy, roll↔gx
   The obvious guess is transposed and makes left/right tilt drive up/down.
+  Getting the transpose right but leaving roll positive is the *second* trap,
+  and the one that shipped: left/right aim backwards, and an owner who flips
+  INVERT X to fix it hides the bug from everyone including themselves.
+  This mapping is now the **default** of a runtime axis map, not a constant —
+  TILT SETUP in settings can re-measure it per unit. See input-and-ux.md.
 - The HAL fuses at 200 Hz (complementary filter, **pitch/roll only — yaw is
   forbidden**, it drifts unusably). Gyro axis signs are learned online by
   correlating gyro rate against accel-derived angle deltas, so mounting

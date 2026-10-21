@@ -184,10 +184,36 @@ void gos_input_calibrate_neutral(void)
     fx.init = fy.init = false;
 }
 
+void gos_input_set_neutral(float pitch, float roll)
+{
+    neutral_pitch = pitch;
+    neutral_roll = roll;
+    gyro_aim_x = gyro_aim_y = 0;
+    drag_aim_x = drag_aim_y = 0;
+    fx.init = fy.init = false;
+}
+
 void gos_input_set_aim_config(const gos_aim_cfg_t *c) { cfg = *c; }
 gos_aim_cfg_t *gos_input_aim_config(void) { return &cfg; }
 
 // --- per-game neutral persistence (sys namespace) --------------------------
+
+// A stored neutral only means anything under the axis map that produced it:
+// change the map (TILT SETUP, or a firmware whose default map changed) and the
+// very angles recorded here flip sign, so a stale neutral drags every game's
+// centre off by twice the stored tilt. Tag the blob with the map and ignore a
+// neutral that does not match. The old 8-byte format fails the length check
+// the same way, so both land on the fallback: whatever neutral is already
+// loaded, which is the "sys" one the shell loads at boot.
+typedef struct { float pitch, roll; uint8_t map; } neutral_blob_t;
+
+static uint8_t neutral_map_tag(void)
+{
+    hal_imu_axis_map_t m;
+    hal_imu_get_axis_map(&m);
+    return (uint8_t)((m.pitch_axis ? 1 : 0) | (m.pitch_sign < 0 ? 2 : 0) |
+                     (m.roll_sign < 0 ? 4 : 0));
+}
 
 void gos_input_save_neutral(const char *game_id)
 {
@@ -195,8 +221,8 @@ void gos_input_save_neutral(const char *game_id)
     if (nvs_open("sys", NVS_READWRITE, &h) != ESP_OK) return;
     char key[16];
     snprintf(key, sizeof key, "n_%.12s", game_id);
-    float v[2] = { neutral_pitch, neutral_roll };
-    nvs_set_blob(h, key, v, sizeof v);
+    neutral_blob_t b = { neutral_pitch, neutral_roll, neutral_map_tag() };
+    nvs_set_blob(h, key, &b, sizeof b);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -207,11 +233,12 @@ void gos_input_load_neutral(const char *game_id)
     if (nvs_open("sys", NVS_READONLY, &h) != ESP_OK) return;
     char key[16];
     snprintf(key, sizeof key, "n_%.12s", game_id);
-    float v[2];
-    size_t len = sizeof v;
-    if (nvs_get_blob(h, key, v, &len) == ESP_OK && len == sizeof v) {
-        neutral_pitch = v[0];
-        neutral_roll = v[1];
+    neutral_blob_t b;
+    size_t len = sizeof b;
+    if (nvs_get_blob(h, key, &b, &len) == ESP_OK && len == sizeof b &&
+        b.map == neutral_map_tag()) {
+        neutral_pitch = b.pitch;
+        neutral_roll = b.roll;
     }
     nvs_close(h);
     fx.init = fy.init = false;

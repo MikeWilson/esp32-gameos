@@ -89,9 +89,22 @@ int gos_save_read(gos_ctx_t *ctx, void *out, size_t max)
 // --- settings (sys namespace) ----------------------------------------------
 
 gos_settings_t g_settings = {
-    .version = 1, .aim_mode = GOS_AIM_TILT_ABS, .sensitivity = 1,
-    .volume = 2, .brightness = 4,
+    .version = GOS_SETTINGS_VERSION, .aim_mode = GOS_AIM_TILT_ABS,
+    .sensitivity = 1, .volume = 2, .brightness = 4,
+    // Accel +Y points screen LEFT on this board, so roll reads negated. This
+    // is the DEFAULT rather than something the wizard has to discover,
+    // because it is what every unit measured so far needs: the two in PR #1
+    // and a third fresh board tested 2026-10-21, which aimed left/right
+    // backwards out of the box with a virgin NVS. The map stays runtime data
+    // so a unit that really is mounted differently can still be taught.
+    .tilt_roll_neg = 1,
 };
+
+// Version 1 of the blob, kept only so an existing unit can be migrated.
+typedef struct {
+    uint8_t version, aim_mode, sensitivity, invert_x, invert_y, volume,
+            brightness, calibrated;
+} settings_v1_t;
 
 void gos_settings_load(void)
 {
@@ -100,9 +113,35 @@ void gos_settings_load(void)
     gos_settings_t s;
     size_t len = sizeof s;
     if (nvs_get_blob(h, "settings", &s, &len) == ESP_OK &&
-        len == sizeof s && s.version == 1)
+        len == sizeof s && s.version == GOS_SETTINGS_VERSION) {
         g_settings = s;
+        nvs_close(h);
+        return;
+    }
+    // A v1 blob is a different size, so the read above missed it. Carry the
+    // fields over instead of landing the user on defaults and silently
+    // resetting their volume and brightness on a firmware update.
+    settings_v1_t o;
+    size_t olen = sizeof o;
+    bool migrate = nvs_get_blob(h, "settings", &o, &olen) == ESP_OK &&
+                   olen == sizeof o && o.version == 1;
+    if (migrate) {
+        g_settings.aim_mode = o.aim_mode;
+        g_settings.sensitivity = o.sensitivity;
+        g_settings.invert_y = o.invert_y;
+        g_settings.volume = o.volume;
+        g_settings.brightness = o.brightness;
+        g_settings.calibrated = o.calibrated;
+        // invert_x is deliberately NOT carried over. Under v1 the default
+        // roll sign was wrong on every unit measured, so INVERT X was the
+        // only way to get left/right the right way round: a stored ON means
+        // "this owner corrected their hardware by hand", not "I prefer
+        // inverted aim". Now that the default map is right, carrying it
+        // would invert aim straight back. Anyone who genuinely wants it
+        // flips one row in settings; the tilt map keeps the new default.
+    }
     nvs_close(h);
+    if (migrate) gos_settings_save();   // replace the v1 blob with a v2 one
 }
 
 void gos_settings_save(void)
@@ -124,6 +163,13 @@ void gos_settings_apply(void)
     c->invert_y = g_settings.invert_y;
     gos_audio_master(g_settings.volume);
     hal_display_brightness(g_settings.brightness * 25);
+    // the IMU's mounting orientation is per-unit user data, not a constant
+    hal_imu_axis_map_t map = {
+        .pitch_axis = g_settings.tilt_pitch_axis ? 1 : 0,
+        .pitch_sign = g_settings.tilt_pitch_neg ? -1 : 1,
+        .roll_sign = g_settings.tilt_roll_neg ? -1 : 1,
+    };
+    hal_imu_set_axis_map(&map);
 }
 
 // --- spatial hash grid ------------------------------------------------------

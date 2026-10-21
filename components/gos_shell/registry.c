@@ -5,6 +5,7 @@
 extern const gos_game_t game_gunship;
 extern const gos_game_t game_golf;
 extern const gos_game_t game_slots;
+extern const gos_game_t game_harvest;
 #ifdef GOS_HAVE_BOMBER
 extern const gos_game_t game_bomber;   // in development; absent from the
 #endif                                 // public tree until it ships
@@ -15,6 +16,7 @@ const gos_game_t *const g_games[] = {
     &game_gunship,
     &game_golf,
     &game_slots,
+    &game_harvest,
 #ifdef GOS_HAVE_BOMBER
     &game_bomber,
 #endif
