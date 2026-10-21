@@ -36,9 +36,9 @@ void hal_imu_get(hal_pose_t *out);
 
 // Accel->angle map. The sensor's mounting orientation varies between units of
 // this board, so the shell's TILT SETUP wizard measures it and pushes the
-// result here; it applies live and is restored from settings at boot. Default
-// (all zero-ish: pitch from accel X, both signs positive) is the mapping the
-// platform shipped with, so units that were already correct need no setup.
+// result here; it applies live and is restored from settings at boot. The
+// default (pitch from accel X, roll negated) is what every unit measured so
+// far needs, so a stock board is correct without opening the wizard.
 typedef struct {
     uint8_t pitch_axis;   // 0 = accel X feeds pitch, 1 = accel Y feeds pitch
     int8_t  pitch_sign;   // +1 / -1

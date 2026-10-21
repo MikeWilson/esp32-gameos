@@ -80,18 +80,30 @@ Tips:
 
 ## TILT SETUP: the sensor is not mounted the same way on every unit
 
-**Measured 2026-08-19 on two ESP32-S3-Touch-AMOLED-1.8 boards: held as played,
-gravity lands on accel +X, and dropping the LEFT edge drives accel Y
-positive.** The mapping the platform shipped with reads roll from +Y, so on
-those two units left/right aim came out backwards, and no aim setting can fix
-it: INVERT X flips both directions at once, RECALIBRATE AIM only moves the
-center. The QMI8658's orientation is a per-unit fact.
+**Measured 2026-08-19 on two ESP32-S3-Touch-AMOLED-1.8 boards, and again
+2026-10-21 on a third with a virgin NVS: held as played, gravity lands on accel
++X, and dropping the LEFT edge drives accel Y positive.** The mapping the
+platform shipped with reads roll from `+Y`, so on all three units left/right
+aim came out backwards.
 
-So the accel→pitch/roll map (which axis feeds which angle, plus a sign each) is
-runtime data, not a constant. It lives in settings next to the other tilt rows
-and is pushed into the IMU task by `gos_settings_apply()`. **The default is the
-original mapping**: a board that was always right stays right and its owner
-never opens the wizard.
+That makes it a **wrong default, not per-unit variance** — three for three is a
+board fact, and the fix is the sign in the default map. It had hidden because
+`INVERT X` does cancel it (it negates `aim_x` alone), so an owner who flipped
+that row once had a correct-aiming unit forever and never saw the bug again.
+`RECALIBRATE AIM` does not help: it only moves the center.
+
+The accel→pitch/roll map (which axis feeds which angle, plus a sign each) is
+nonetheless runtime data rather than a constant. It lives in settings next to
+the other tilt rows and is pushed into the IMU task by `gos_settings_apply()`.
+**The default is the measured-correct mapping** (`pitch<-+ax`, `roll<--ay`), so
+a stock board aims correctly out of the box and nobody has to open the wizard.
+The wizard is kept for the unit that genuinely is mounted differently — if a
+future board revision moves the part, it is already handled.
+
+Upgrading from a v1 settings blob migrates the other fields but deliberately
+**drops a stored `INVERT X`**: under v1 that toggle was the only way to correct
+the hardware, so an ON there meant "compensated by hand", and carrying it onto
+the corrected default would invert aim right back.
 
 ![TILT SETUP wizard](../media/tilt-setup.gif)
 

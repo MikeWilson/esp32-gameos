@@ -22,8 +22,9 @@ void gos_save_init(void);
 // consume a pending gos_request_exit() (shell only)
 bool gos_core_take_exit(void);
 // sys settings blob (shell-owned). Version 2 added the tilt axis map; a
-// version-1 blob is a different size and simply fails to load, which lands
-// every field on its default, the same thing a first boot does.
+// version-1 blob is migrated field by field (see gos_settings_load) rather
+// than dropped, so an existing unit keeps its volume, brightness, sensitivity
+// and aim mode across the upgrade.
 typedef struct {
     uint8_t version;
     uint8_t aim_mode;       // gos_aim_mode_t
@@ -32,7 +33,7 @@ typedef struct {
     uint8_t volume;         // 0..3
     uint8_t brightness;     // 1..4 -> 25/50/75/100
     uint8_t calibrated;     // first-run wizard done
-    // accel->angle map measured by TILT SETUP; all zero = the shipped mapping
+    // accel->angle map; defaults to the measured-correct one, TILT SETUP writes
     uint8_t tilt_pitch_axis;   // 0 = accel X feeds pitch, 1 = accel Y
     uint8_t tilt_pitch_neg;    // pitch reads negated
     uint8_t tilt_roll_neg;     // roll reads negated

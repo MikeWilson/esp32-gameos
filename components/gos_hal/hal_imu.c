@@ -41,17 +41,23 @@ static float corr_pitch, corr_roll;
 
 // --- accel axis map --------------------------------------------------------
 // Which accel axis feeds pitch (the other feeds roll) plus a sign per angle.
-// The QMI8658 is not mounted the same way on every unit of this board, so this
-// is user data, set by the TILT SETUP wizard and restored from settings at
-// boot. The default is the mapping the platform shipped with (pitch<-+ax,
-// roll<-+ay), so a unit that was already right stays right without setup.
+// This is user data: the TILT SETUP wizard measures it and settings restores
+// it at boot. The default (pitch<-+ax, roll<--ay) is the mapping measured on
+// every unit anyone has checked, so a stock board is correct without ever
+// opening the wizard; the wizard exists for a unit that differs.
+//
+// It is NOT the mapping the platform originally shipped. That one had roll
+// positive, which aimed left/right backwards on all three boards measured,
+// and the wrong sign hid behind an INVERT X that owners had flipped by hand.
 //
 // Packed into one aligned word: the 200 Hz task reads the map every sample and
 // must never see half of an update.
 #define MAP_PITCH_Y   1u    // accel Y feeds pitch (default: accel X does)
 #define MAP_PITCH_NEG 2u
 #define MAP_ROLL_NEG  4u
-static volatile uint32_t axis_map;
+// Defaults to the measured-correct map so the IMU task is right from its
+// first sample, before gos_settings_apply() has pushed stored settings in.
+static volatile uint32_t axis_map = MAP_ROLL_NEG;
 
 // Latest raw sample, published for the setup wizard. It cannot use the ring
 // below: that has a single consumer and belongs to games.
